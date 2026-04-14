@@ -69,6 +69,7 @@ class MavsdkCommandDispatcher : public arch_nav::platform::ICommandDispatcher {
   std::optional<mavsdk::Mission::MissionProgressHandle>    mission_progress_handle_;
   std::atomic<bool>      land_in_progress_{false};
   std::atomic<bool>      land_completion_notified_{false};
+  std::atomic<bool>      land_on_ground_detected_{false};
 };
 
 }  // namespace arch_nav_mavsdk

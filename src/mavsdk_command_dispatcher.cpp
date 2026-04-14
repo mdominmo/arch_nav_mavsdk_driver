@@ -120,6 +120,7 @@ CommandResponse MavsdkCommandDispatcher::execute_land(
   stop_requested_ = false;
   land_in_progress_ = true;
   land_completion_notified_ = false;
+  land_on_ground_detected_ = false;
 
   monitor_thread_ = std::thread([this] {
     wait_for_landed_and_notify();
@@ -129,12 +130,16 @@ CommandResponse MavsdkCommandDispatcher::execute_land(
 }
 
 void MavsdkCommandDispatcher::complete_landing_if_pending() {
-  if (!land_in_progress_.load() || land_completion_notified_.load()) {
+  if (!land_in_progress_.load() ||
+      land_completion_notified_.load() ||
+      !land_on_ground_detected_.load()) {
     return;
   }
 
   std::lock_guard<std::mutex> lock(complete_mutex_);
-  if (!land_in_progress_.load() || land_completion_notified_.load()) {
+  if (!land_in_progress_.load() ||
+      land_completion_notified_.load() ||
+      !land_on_ground_detected_.load()) {
     return;
   }
 
@@ -242,19 +247,19 @@ void MavsdkCommandDispatcher::stop() {
   on_complete_ = nullptr;
   land_in_progress_ = false;
   land_completion_notified_ = false;
+  land_on_ground_detected_ = false;
 }
 
 void MavsdkCommandDispatcher::wait_for_landed_and_notify() {
-  auto landed_detected = std::make_shared<std::atomic<bool>>(false);
   landed_state_handle_ = telemetry_->subscribe_landed_state(
-      [landed_detected](Telemetry::LandedState landed_state) {
+      [this](Telemetry::LandedState landed_state) {
         if (landed_state == Telemetry::LandedState::OnGround) {
-          landed_detected->store(true);
+          land_on_ground_detected_ = true;
         }
       });
 
   while (!stop_requested_) {
-    if (landed_detected->load()) {
+    if (land_on_ground_detected_.load()) {
       complete_landing_if_pending();
       clear_subscriptions();
       return;
