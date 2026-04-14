@@ -5,6 +5,7 @@
 #include <optional>
 #include <stdexcept>
 
+#include <mavsdk/log_callback.h>
 #include <mavsdk/plugins/telemetry/telemetry.h>
 
 #include "arch_nav/context/vehicle_context.hpp"
@@ -14,6 +15,18 @@
 using namespace mavsdk;
 
 namespace arch_nav_mavsdk {
+namespace {
+
+const mavsdk::log::Callback kSilentMavsdkLogCallback =
+    [](mavsdk::log::Level, const std::string&, const std::string&, int) {
+      return true;
+    };
+
+void silence_mavsdk_logs() {
+  mavsdk::log::subscribe(kSilentMavsdkLogCallback);
+}
+
+}  // namespace
 
 struct MavsdkPlatformDriver::Internals {
   MavsdkCommandDispatcher dispatcher;
@@ -24,6 +37,8 @@ struct MavsdkPlatformDriver::Internals {
 
 MavsdkPlatformDriver::MavsdkPlatformDriver(const MavsdkConfig& config)
     : config_(config) {
+  silence_mavsdk_logs();
+
   Mavsdk::Configuration mavsdk_config{ComponentType::GroundStation};
   mavsdk_ = std::make_unique<Mavsdk>(mavsdk_config);
 
@@ -52,6 +67,7 @@ arch_nav::platform::ICommandDispatcher& MavsdkPlatformDriver::dispatcher() {
 
 void MavsdkPlatformDriver::start(arch_nav::context::VehicleContext& context,
                                   std::chrono::milliseconds update_period) {
+  silence_mavsdk_logs();
   running_ = true;
   telemetry_thread_ = std::thread([this, &context, update_period] {
     Telemetry telemetry(system_);
@@ -61,7 +77,7 @@ void MavsdkPlatformDriver::start(arch_nav::context::VehicleContext& context,
     std::optional<arch_nav::vehicle::Kinematics> buf_kin;
     std::optional<arch_nav::vehicle::VehicleStatus> buf_status;
 
-    telemetry.subscribe_position(
+    const auto position_handle = telemetry.subscribe_position(
         [&buf_mutex, &buf_gp](Telemetry::Position pos) {
           std::lock_guard<std::mutex> lock(buf_mutex);
           buf_gp.emplace(
@@ -69,7 +85,7 @@ void MavsdkPlatformDriver::start(arch_nav::context::VehicleContext& context,
               static_cast<double>(pos.absolute_altitude_m));
         });
 
-    telemetry.subscribe_velocity_ned(
+    const auto velocity_ned_handle = telemetry.subscribe_velocity_ned(
         [&buf_mutex, &buf_kin, &telemetry](Telemetry::VelocityNed vel) {
           auto pos = telemetry.position();
           auto heading = telemetry.heading();
@@ -83,8 +99,12 @@ void MavsdkPlatformDriver::start(arch_nav::context::VehicleContext& context,
               heading.heading_deg);
         });
 
-    telemetry.subscribe_armed(
-        [&buf_mutex, &buf_status](bool armed) {
+    const auto armed_handle = telemetry.subscribe_armed(
+        [this, &buf_mutex, &buf_status](bool armed) {
+          // Ensure landing completion is signaled before propagating DISARMED.
+          if (!armed && internals_) {
+            internals_->dispatcher.notify_landing_complete_if_pending();
+          }
           std::lock_guard<std::mutex> lock(buf_mutex);
           buf_status.emplace(
               arch_nav::constants::ControlState::KERNEL_CONTROLLED,
@@ -110,9 +130,9 @@ void MavsdkPlatformDriver::start(arch_nav::context::VehicleContext& context,
       if (status) context.update(*status);
     }
 
-    telemetry.subscribe_position(nullptr);
-    telemetry.subscribe_velocity_ned(nullptr);
-    telemetry.subscribe_armed(nullptr);
+    telemetry.unsubscribe_position(position_handle);
+    telemetry.unsubscribe_velocity_ned(velocity_ned_handle);
+    telemetry.unsubscribe_armed(armed_handle);
   });
 }
 

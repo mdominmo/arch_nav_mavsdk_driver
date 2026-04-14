@@ -46,8 +46,10 @@ class MavsdkCommandDispatcher : public arch_nav::platform::ICommandDispatcher {
   arch_nav::constants::CommandResponse execute_arm() override;
   arch_nav::constants::CommandResponse execute_disarm() override;
   void stop() override;
+  void notify_landing_complete_if_pending();
 
  private:
+  void complete_landing_if_pending();
   void wait_for_landed_and_notify();
   void clear_subscriptions();
 
@@ -63,7 +65,10 @@ class MavsdkCommandDispatcher : public arch_nav::platform::ICommandDispatcher {
   std::thread            monitor_thread_;
 
   std::optional<mavsdk::Telemetry::FlightModeHandle>      flight_mode_handle_;
+  std::optional<mavsdk::Telemetry::LandedStateHandle>     landed_state_handle_;
   std::optional<mavsdk::Mission::MissionProgressHandle>    mission_progress_handle_;
+  std::atomic<bool>      land_in_progress_{false};
+  std::atomic<bool>      land_completion_notified_{false};
 };
 
 }  // namespace arch_nav_mavsdk

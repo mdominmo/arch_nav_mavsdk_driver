@@ -28,6 +28,10 @@ void MavsdkCommandDispatcher::clear_subscriptions() {
     telemetry_->unsubscribe_flight_mode(*flight_mode_handle_);
     flight_mode_handle_.reset();
   }
+  if (landed_state_handle_) {
+    telemetry_->unsubscribe_landed_state(*landed_state_handle_);
+    landed_state_handle_.reset();
+  }
   if (mission_progress_handle_) {
     mission_->unsubscribe_mission_progress(*mission_progress_handle_);
     mission_progress_handle_.reset();
@@ -114,12 +118,36 @@ CommandResponse MavsdkCommandDispatcher::execute_land(
     on_complete_ = std::move(on_complete);
   }
   stop_requested_ = false;
+  land_in_progress_ = true;
+  land_completion_notified_ = false;
 
   monitor_thread_ = std::thread([this] {
     wait_for_landed_and_notify();
   });
 
   return CommandResponse::ACCEPTED;
+}
+
+void MavsdkCommandDispatcher::complete_landing_if_pending() {
+  if (!land_in_progress_.load() || land_completion_notified_.load()) {
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(complete_mutex_);
+  if (!land_in_progress_.load() || land_completion_notified_.load()) {
+    return;
+  }
+
+  if (on_complete_) {
+    on_complete_();
+    on_complete_ = nullptr;
+  }
+  land_completion_notified_ = true;
+  land_in_progress_ = false;
+}
+
+void MavsdkCommandDispatcher::notify_landing_complete_if_pending() {
+  complete_landing_if_pending();
 }
 
 CommandResponse MavsdkCommandDispatcher::execute_waypoint_following(
@@ -212,20 +240,28 @@ void MavsdkCommandDispatcher::stop() {
 
   std::lock_guard<std::mutex> lock(complete_mutex_);
   on_complete_ = nullptr;
+  land_in_progress_ = false;
+  land_completion_notified_ = false;
 }
 
 void MavsdkCommandDispatcher::wait_for_landed_and_notify() {
+  auto landed_detected = std::make_shared<std::atomic<bool>>(false);
+  landed_state_handle_ = telemetry_->subscribe_landed_state(
+      [landed_detected](Telemetry::LandedState landed_state) {
+        if (landed_state == Telemetry::LandedState::OnGround) {
+          landed_detected->store(true);
+        }
+      });
+
   while (!stop_requested_) {
-    if (!telemetry_->armed()) {
-      std::lock_guard<std::mutex> lock(complete_mutex_);
-      if (on_complete_) {
-        on_complete_();
-        on_complete_ = nullptr;
-      }
+    if (landed_detected->load()) {
+      complete_landing_if_pending();
+      clear_subscriptions();
       return;
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
+  clear_subscriptions();
 }
 
 }  // namespace arch_nav_mavsdk
