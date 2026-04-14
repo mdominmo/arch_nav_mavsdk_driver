@@ -60,6 +60,7 @@ class MavsdkCommandDispatcher : public arch_nav::platform::ICommandDispatcher {
   MavsdkConfig config_;
 
   std::atomic<bool>      stop_requested_{false};
+  std::atomic<bool>      resources_released_{false};
   std::function<void()>  on_complete_;
   std::mutex             complete_mutex_;
   std::thread            monitor_thread_;

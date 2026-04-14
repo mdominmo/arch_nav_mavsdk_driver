@@ -92,15 +92,23 @@ CommandResponse MavsdkCommandDispatcher::execute_takeoff(
 
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
       if (completed->load()) {
-        std::lock_guard<std::mutex> lock(complete_mutex_);
-        if (on_complete_) {
-          on_complete_();
-          on_complete_ = nullptr;
-        }
         break;
       }
     }
+
+    // Phase 1: release driver resources
     clear_subscriptions();
+    resources_released_ = true;
+
+    // Phase 2: notify external consumer
+    if (!stop_requested_) {
+      std::function<void()> cb;
+      {
+        std::lock_guard<std::mutex> lock(complete_mutex_);
+        cb = std::move(on_complete_);
+      }
+      if (cb) cb();
+    }
   });
 
   return CommandResponse::ACCEPTED;
@@ -136,19 +144,24 @@ void MavsdkCommandDispatcher::complete_landing_if_pending() {
     return;
   }
 
-  std::lock_guard<std::mutex> lock(complete_mutex_);
-  if (!land_in_progress_.load() ||
-      land_completion_notified_.load() ||
-      !land_on_ground_detected_.load()) {
-    return;
-  }
+  std::function<void()> cb;
+  {
+    std::lock_guard<std::mutex> lock(complete_mutex_);
+    if (!land_in_progress_.load() ||
+        land_completion_notified_.load() ||
+        !land_on_ground_detected_.load()) {
+      return;
+    }
 
-  if (on_complete_) {
-    on_complete_();
-    on_complete_ = nullptr;
+    // Phase 1: release driver resources
+    land_completion_notified_ = true;
+    land_in_progress_ = false;
+    resources_released_ = true;
+
+    // Phase 2: prepare external notification
+    cb = std::move(on_complete_);
   }
-  land_completion_notified_ = true;
-  land_in_progress_ = false;
+  if (cb) cb();
 }
 
 void MavsdkCommandDispatcher::notify_landing_complete_if_pending() {
@@ -214,11 +227,18 @@ CommandResponse MavsdkCommandDispatcher::execute_waypoint_following(
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
       auto finished = mission_->is_mission_finished();
       if (finished.first == Mission::Result::Success && finished.second) {
+        // Phase 1: release driver resources
         clear_subscriptions();
-        std::lock_guard<std::mutex> lock(complete_mutex_);
-        if (on_complete_) {
-          on_complete_();
-          on_complete_ = nullptr;
+        resources_released_ = true;
+
+        // Phase 2: notify external consumer
+        if (!stop_requested_) {
+          std::function<void()> cb;
+          {
+            std::lock_guard<std::mutex> lock(complete_mutex_);
+            cb = std::move(on_complete_);
+          }
+          if (cb) cb();
         }
         break;
       }
@@ -240,9 +260,15 @@ void MavsdkCommandDispatcher::stop() {
   clear_subscriptions();
 
   if (monitor_thread_.joinable()) {
-    monitor_thread_.join();
+    const bool is_monitor_thread =
+        monitor_thread_.get_id() == std::this_thread::get_id();
+    if (is_monitor_thread || resources_released_.load())
+      monitor_thread_.detach();
+    else
+      monitor_thread_.join();
   }
 
+  resources_released_ = false;
   std::lock_guard<std::mutex> lock(complete_mutex_);
   on_complete_ = nullptr;
   land_in_progress_ = false;
